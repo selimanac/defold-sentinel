@@ -41,7 +41,10 @@ function init(self)
         extra = {
             ["example_extra"] = "Example Extra Data",
         },
-        release = sys.get_config("sentinel.sentry_release")
+        release = sys.get_config_string("sentinel.sentry_release"),
+        -- Outgoing Sentry requests are compressed with Defold zlib/deflate by default.
+        -- Set this to false to send plain JSON instead.
+        compress_requests = true
     })
 end
 ```
@@ -83,6 +86,10 @@ sentry_release = project-id@project-version
 ```
 
 Setting the `sentinel.sentry_dsn_html5` option initializes Sentry JavaScript SDK in the HTML5 template ([take a look at how it's done](https://github.com/indiesoftby/defold-sentinel/blob/main/sentinel/manifests/web/engine_template.html#L3)).
+
+Sentinel compresses Lua `http.request` payloads with Defold's `zlib.deflate()` by default and sends them with
+`Content-Encoding: deflate`. Set `compress_requests = false` in `sentry.init()` if you need to disable request
+compression.
 
 ### GameAnalytics Compatibility
 

@@ -2,26 +2,30 @@ local sentry = require("sentinel.sentry")
 
 local function init_sentry()
     sentry.init({
-        dsn = sys.get_config("sentinel.sentry_dsn_html5"),
-        debug = true,
+        dsn     = sys.get_config_string("sentinel.sentry_dsn_html5"),
+        debug   = true,
         dry_run = false,
-        tags = {
+        tags    = {
             ["example_tag"] = "Example Tag Data",
         },
-        extra = {
+        extra   = {
             ["example_extra"] = "Example Extra Data",
         },
-        release = sys.get_config("sentinel.sentry_release")
+        release = sys.get_config_string("sentinel.sentry_release")
     })
 end
 
 local function send_sentry_msg()
-    sentry.add_breadcrumb({category = "log", message = "Test breadcrumb message"})
-    sentry.capture_message({message = "Test message", level = "info", extra = {
-        example_extra_2 = "Hello!"
-    } })
+    sentry.add_breadcrumb({ category = "log", message = "Test breadcrumb message" })
+    sentry.capture_message({
+        message    = "Test message",
+        level_data = "info",
+        extra      = {
+            example_extra_2 = "Hello!"
+        }
+    })
 
-    sentry.add_breadcrumb({category = "log", message = "Test breadcrumb message #2"})
+    sentry.add_breadcrumb({ category = "log", message = "Test breadcrumb message #2" })
     error("Test error")
 end
 

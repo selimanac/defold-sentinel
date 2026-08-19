@@ -218,6 +218,43 @@ local function new_event()
     return event
 end
 
+local function compress_post_data(post_data, headers)
+    if not M.config.compress_requests then
+        return post_data
+    end
+
+    if type(zlib) ~= "table" or type(zlib.deflate) ~= "function" then
+        if M.config.debug then
+            log_print("Request compression unavailable: zlib.deflate is missing")
+        end
+        return post_data
+    end
+
+    local ok, compressed_data = pcall(zlib.deflate, post_data)
+    if not ok then
+        if M.config.debug then
+            log_print("Request compression failed: " .. tostring(compressed_data))
+        end
+        return post_data
+    end
+    if type(compressed_data) ~= "string" then
+        if M.config.debug then
+            log_print("Request compression failed: zlib.deflate returned " .. type(compressed_data))
+        end
+        return post_data
+    end
+
+    headers["Content-Encoding"] = "deflate"
+    if M.config.debug then
+        log_print(string.format(
+            "Compressed request payload: %d -> %d bytes",
+            string.len(post_data),
+            string.len(compressed_data)
+        ))
+    end
+    return compressed_data
+end
+
 --- Sends the JSON-encoded event data to the Sentry server.
 -- @tparam string json_str The JSON-encoded event data to send.
 -- @tparam[opt] function callback A callback function to be called after the request is completed.
@@ -240,6 +277,7 @@ local function send(json_str, callback)
         end
         cb_handler(M.obj, "(dry run)", { response = json.encode({ id = "(dry run)" }), status = 200 })
     else
+        post_data = compress_post_data(post_data, headers)
         http.request(url, method, cb_handler, headers, post_data, options)
     end
 end
@@ -267,6 +305,7 @@ end
 -- @tparam string config.dsn The DSN tells the SDK where to send the events
 -- @tparam[opt=false] boolean config.debug Turn on to debug and check what data Sentinel sends
 -- @tparam[opt=false] boolean config.dry_run If true, don't actually send data to Sentry
+-- @tparam[opt=true] boolean config.compress_requests Compress outgoing Sentry requests with deflate
 -- @tparam[opt=false] boolean config.gameanalytics Whether to duplicate errors to GameAnalytics if it's installed
 -- @tparam[opt=30] number config.send_timeout HTTP request timeout
 -- @tparam[opt=true] boolean config.set_error_handler Install a custom Lua error handler
@@ -294,6 +333,9 @@ function M.init(config)
     end
     if type(M.config.load_previous_crash) ~= "boolean" then
         M.config.load_previous_crash = true
+    end
+    if type(M.config.compress_requests) ~= "boolean" then
+        M.config.compress_requests = true
     end
 
     --
