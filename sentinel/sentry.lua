@@ -6,16 +6,16 @@
 -- SDK Development Documentation: https://develop.sentry.dev/sdk/overview/
 --
 
-local M = {}
+local M           = {}
 
-local LOG_PREFIX = "SENTINEL: "
+local LOG_PREFIX  = "SENTINEL: "
 local LOGGER_NAME = "sentinel"
-local VERSION = "1.3.0"
-local USER_AGENT = "sentinel-sentry/" .. VERSION
+local VERSION     = "1.3.1"
+local USER_AGENT  = "sentinel-sentry/" .. VERSION
 
-local APP_PATH = sys.get_application_path()
+local APP_PATH    = sys.get_application_path()
 local ENGINE_INFO = sys.get_engine_info()
-local SYS_INFO = sys.get_sys_info({ignore_secure = true})
+local SYS_INFO    = sys.get_sys_info({ ignore_secure = true })
 
 --- Generates a unique event ID suitable for use in Sentry.
 -- This function creates a 32-character hexadecimal string based on the current time and random numbers.
@@ -99,7 +99,7 @@ end
 -- @tparam string dsn The DSN string to parse
 -- @tparam[opt] table obj The table to store the parsed DSN fields
 -- @treturn table|nil The parsed DSN table, or nil if parsing fails
--- @treturn string|nil An error message if parsing fails, or nil on success 
+-- @treturn string|nil An error message if parsing fails, or nil on success
 local function parse_dsn(dsn, obj)
     if not obj then
         obj = {}
@@ -198,7 +198,7 @@ local function new_event()
         end
     end
 
-    event.tags["project.version"] = sys.get_config("project.version")
+    event.tags["project.version"] = sys.get_config_string("project.version")
 
     if html5 then
         event.request = {
@@ -224,7 +224,7 @@ end
 local function send(json_str, callback)
     local url = M.obj.server .. "?sentry_version=7&sentry_key=" .. M.obj.public_key
     local method = "POST"
-    local headers = {["Content-Type"] = "application/json"}
+    local headers = { ["Content-Type"] = "application/json" }
     if not html5 then
         headers["User-Agent"] = USER_AGENT
     end
@@ -238,14 +238,14 @@ local function send(json_str, callback)
         if M.config.debug then
             log_print("Sending http request (dry run)")
         end
-        cb_handler(M.obj, "(dry run)", {response = json.encode({id = "(dry run)"}), status = 200})
+        cb_handler(M.obj, "(dry run)", { response = json.encode({ id = "(dry run)" }), status = 200 })
     else
         http.request(url, method, cb_handler, headers, post_data, options)
     end
 end
 
 local function error_handler(source, message, traceback)
-    local error = {source = source, message = message, traceback = traceback}
+    local error = { source = source, message = message, traceback = traceback }
     local pstatus, perr = pcall(M.capture_exception, error)
     if not pstatus then
         log_print("Exception capture error " .. perr)
@@ -410,7 +410,7 @@ end
 -- @tparam[opt] string err.source Error source
 -- @tparam[opt] boolean err.fatal Whether the error is fatal
 -- @tparam[opt] table err.tags Additional tags to include
--- @tparam[opt] table err.extra Additional extra data to include  
+-- @tparam[opt] table err.extra Additional extra data to include
 -- @tparam[opt] function err.callback A function to be called after the message is sent, with parameters (id, err_str)
 -- @usage
 -- local err = {
@@ -420,7 +420,7 @@ end
 --     fatal = false,
 --     tags = {level = "boss"},
 --     extra = {input_value = 0},
---     callback = function(id, err_str) 
+--     callback = function(id, err_str)
 --         if id then
 --             print("Captured with ID: " .. tostring(id))
 --         else
