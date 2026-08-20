@@ -17,6 +17,7 @@ Sentry.io is a paid system, but it has a free plan for developers to track up to
 | Defold Lua errors (all platforms) | Supported ✅ |
 | Browser (HTML5) | Loads JavaScript SDK to track non-Lua errors ☑️ |
 | Defold native crash dumps | Reports previous crash dumps through Defold's `crash` API when available |
+| GPU context | Adds portable Defold adapter data and best-effort desktop native GPU fields |
 | Native minidump/Crashpad-style capture and full symbolication | Not Implemented ❌ |
 
 ## Installation & Usage
@@ -46,6 +47,10 @@ function init(self)
 
         -- Loads and reports the previous Defold native crash dump on startup.
         load_previous_crash = sys.get_config_boolean("sentinel.sentry_load_previous_crash", true),
+
+        -- Adds contexts.gpu and extra.defold_graphics to every event.
+        collect_gpu_info = sys.get_config_boolean("sentinel.sentry_collect_gpu_info", true),
+        gpu_extensions_limit = sys.get_config_number("sentinel.sentry_gpu_extensions_limit", 128),
 
         -- Tags and extra data are optional
         tags = {
@@ -188,12 +193,23 @@ Previous Defold native crash reports are sent as fatal exception events with:
 - message: `Previous Defold native crash`
 - tag `kind = "defold_crash"`
 - tag `platform = sys.get_sys_info().system_name`
+- the same cached GPU context used by normal Lua events
 - native stack frames generated from `crash.get_backtrace()`
 - module-relative frame keys generated from `crash.get_modules()`
 - a native crash fingerprint based on project, release, environment, signal, and top native frames
 - extras for `signum`, `extra_data`, `backtrace_json`, `backtrace_count`, `modules_json`, `module_count`, `sys_fields_json`, and `user_fields_json`
 
 This improves grouping for previous Defold native crash reports. It is not full native symbolication: addresses stored only in extras are not enough for dSYM/PDB symbolication, and Defold's Lua `crash` API does not provide complete Sentry debug-image metadata here.
+
+### GPU Context
+
+By default, Sentinel collects GPU information once during `sentry.init()` and attaches it to every event. Portable data comes from Defold's `graphics.get_adapter_info()`. Desktop builds also expose `sentinel_native.get_gpu_info()` to collect best-effort active adapter strings and IDs from the native backend.
+
+Events include normalized Sentry GPU data in `contexts.gpu`, including `name`, `vendor_name`, `vendor_id`, `id`, `device_id`, `version`, `driver_version`, `api_type`, `memory_size`, `max_texture_size`, `supports_compute_shaders`, and `supports_draw_call_instancing` when available.
+
+Verbose Defold adapter data is stored in `extra.defold_graphics`: `family`, `version_major`, `version_minor`, `limits`, `features`, `extensions`, `extensions_count`, and `extensions_truncated`. `gpu_extensions_limit` defaults to `128` to keep payloads bounded. Set `collect_gpu_info = false` to disable this collection.
+
+Sentinel only adds low-cardinality GPU tags: `gpu.api_type`, `gpu.vendor_name`, and `gpu.vendor_id`. Full renderer names are not tagged unless your app adds its own tag.
 
 ### Configuration Options
 
@@ -205,6 +221,8 @@ This improves grouping for previous Defold native crash reports. It is not full 
     debug = false,
     dry_run = false,
     compress_requests = true,
+    collect_gpu_info = true,
+    gpu_extensions_limit = 128,
     gameanalytics = false,
     send_timeout = 30,
     set_error_handler = true,
@@ -264,6 +282,8 @@ sentry_debug = 0
 sentry_dry_run = 0
 sentry_send_timeout = 10
 sentry_load_previous_crash = 1
+sentry_collect_gpu_info = 1
+sentry_gpu_extensions_limit = 128
 
 # Optional overrides
 # sentry_release = my_game@1.0.0
@@ -279,6 +299,9 @@ Setting the `sentinel.sentry_dsn_html5` option initializes Sentry JavaScript SDK
 Sentinel compresses Lua `http.request` payloads with Defold's `zlib.deflate()` by default and sends them with
 `Content-Encoding: deflate`. Set `compress_requests = false` in `sentry.init()` if you need to disable request
 compression.
+
+Sentinel collects GPU context by default. Set `collect_gpu_info = false` in `sentry.init()` to disable it, or lower
+`gpu_extensions_limit` if you want smaller event payloads.
 
 ### Desktop Test Script
 

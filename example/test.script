@@ -9,7 +9,9 @@ local CONFIG = {
 	DEBUG = "sentinel.sentry_debug",
 	DRY_RUN = "sentinel.sentry_dry_run",
 	SEND_TIMEOUT = "sentinel.sentry_send_timeout",
-	LOAD_PREVIOUS_CRASH = "sentinel.sentry_load_previous_crash"
+	LOAD_PREVIOUS_CRASH = "sentinel.sentry_load_previous_crash",
+	COLLECT_GPU_INFO = "sentinel.sentry_collect_gpu_info",
+	GPU_EXTENSIONS_LIMIT = "sentinel.sentry_gpu_extensions_limit"
 }
 
 local DEFAULT_ENVIRONMENT = "sandbox"
@@ -122,35 +124,37 @@ local function init_sentry()
 	print("SENTRY TEST CONFIG: using " .. CONFIG.DSN)
 
 	local configured_release = sys.get_config_string(CONFIG.RELEASE, "")
-	local build_id    = get_build_id()
-	local environment = get_environment()
-	local sys_info    = sys.get_sys_info({ ignore_secure = true }) or {}
-	local config      = {
+	local build_id           = get_build_id()
+	local environment        = get_environment()
+	local sys_info           = sys.get_sys_info({ ignore_secure = true }) or {}
+	local config             = {
 		dsn                    = dsn,
 		debug                  = sys.get_config_boolean(CONFIG.DEBUG, false),
 		dry_run                = sys.get_config_boolean(CONFIG.DRY_RUN, false),
 		set_error_handler      = true,
 		load_previous_crash    = sys.get_config_boolean(CONFIG.LOAD_PREVIOUS_CRASH, true),
 		send_timeout           = sys.get_config_number(CONFIG.SEND_TIMEOUT, DEFAULT_SEND_TIMEOUT),
+		collect_gpu_info       = sys.get_config_boolean(CONFIG.COLLECT_GPU_INFO, true),
+		gpu_extensions_limit   = sys.get_config_number(CONFIG.GPU_EXTENSIONS_LIMIT, 128),
 		environment            = environment,
 		crash_user_field_names = {
-				release     = 0,
-				environment = 1,
-				last_event  = 4,
-				build_id    = 5
-			},
-			previous_crash_event   = {
-				callback = make_capture_callback("Previous native crash")
-			},
-			tags                   = {
-				kind     = "sentinel_desktop_test",
-				runtime  = "defold_lua",
-				platform = tostring(sys_info.system_name)
-			},
-			extra                  = {
-				project_title   = sys.get_config_string("project.title", ""),
-				project_version = sys.get_config_string("project.version", "")
-			}
+			release     = 0,
+			environment = 1,
+			last_event  = 4,
+			build_id    = 5
+		},
+		previous_crash_event   = {
+			callback = make_capture_callback("Previous native crash")
+		},
+		tags                   = {
+			kind     = "sentinel_desktop_test",
+			runtime  = "defold_lua",
+			platform = tostring(sys_info.system_name)
+		},
+		extra                  = {
+			project_title   = sys.get_config_string("project.title", ""),
+			project_version = sys.get_config_string("project.version", "")
+		}
 	}
 
 	if build_id ~= "" then
@@ -244,6 +248,8 @@ end
 function init(self)
 	msg.post("@render:", "use_fixed_fit_projection", { near = -1, far = 1 })
 	msg.post(".", "acquire_input_focus")
+
+	pprint(sentinel_native.get_gpu_info())
 
 	show_controls()
 	init_sentry()

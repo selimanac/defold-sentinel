@@ -20,6 +20,7 @@ local SYS_INFO                       = sys.get_sys_info({ ignore_secure = true }
 local DEFAULT_CRASH_EXTRA_TEXT_LIMIT = 8192
 local DEFAULT_CRASH_USER_FIELD_SIZE  = 255
 local DEFAULT_CRASH_USER_FIELD_MAX   = 32
+local DEFAULT_GPU_EXTENSIONS_LIMIT   = 128
 local CRASH_FINGERPRINT_FRAME_LIMIT  = 6
 
 local state                          = {
@@ -214,6 +215,234 @@ local function apply_event_overrides(event, overrides)
     event.extra = event.extra or {}
     copy_kv(event.tags, overrides.tags)
     copy_kv(event.extra, overrides.extra)
+end
+
+local function copy_table(value)
+    if type(value) ~= "table" then
+        return value
+    end
+
+    local copied = {}
+    for key, item in pairs(value) do
+        copied[key] = copy_table(item)
+    end
+    return copied
+end
+
+local function set_present_field(dest, key, value)
+    if value == nil then
+        return
+    end
+    if type(value) == "string" and value == "" then
+        return
+    end
+
+    dest[key] = value
+end
+
+local function set_tag_field(tags, key, value)
+    if value == nil then
+        return
+    end
+
+    local text = tostring(value)
+    if text == "" then
+        return
+    end
+
+    tags[key] = text
+end
+
+local function get_gpu_extensions_limit()
+    if type(M.config) == "table" and type(M.config.gpu_extensions_limit) == "number" then
+        return math.max(0, math.floor(M.config.gpu_extensions_limit))
+    end
+
+    return DEFAULT_GPU_EXTENSIONS_LIMIT
+end
+
+local function adapter_family_to_api_type(family)
+    if family == "opengl" then
+        return "OpenGL"
+    end
+    if family == "opengles" then
+        return "OpenGL ES"
+    end
+    if family == "vulkan" then
+        return "Vulkan"
+    end
+    if family == "directx" then
+        return "DirectX 12"
+    end
+    if family == "metal" then
+        return "Metal"
+    end
+    if family == "webgpu" then
+        return "WebGPU"
+    end
+
+    return nil
+end
+
+local function make_adapter_version(adapter_info)
+    if type(adapter_info) ~= "table" then
+        return nil
+    end
+
+    local major = adapter_info.version_major
+    local minor = adapter_info.version_minor
+    if type(major) == "number" and type(minor) == "number" then
+        return tostring(major) .. "." .. tostring(minor)
+    end
+
+    return nil
+end
+
+local function has_feature(features, feature_id)
+    if type(features) ~= "table" or feature_id == nil then
+        return nil
+    end
+
+    for i = 1, #features do
+        if features[i] == feature_id then
+            return true
+        end
+    end
+
+    return false
+end
+
+local function copy_defold_graphics_info(adapter_info)
+    if type(adapter_info) ~= "table" then
+        return nil
+    end
+
+    local info = {}
+    set_present_field(info, "family", adapter_info.family)
+    set_present_field(info, "version_major", adapter_info.version_major)
+    set_present_field(info, "version_minor", adapter_info.version_minor)
+
+    if type(adapter_info.limits) == "table" then
+        info.limits = copy_table(adapter_info.limits)
+    end
+    if type(adapter_info.features) == "table" then
+        info.features = copy_table(adapter_info.features)
+    end
+
+    local extensions = adapter_info.extensions
+    local extensions_count = type(extensions) == "table" and #extensions or 0
+    local limit = get_gpu_extensions_limit()
+    info.extensions_count = extensions_count
+    info.extensions_truncated = extensions_count > limit
+
+    if extensions_count > 0 and limit > 0 then
+        info.extensions = {}
+        for i = 1, math.min(extensions_count, limit) do
+            info.extensions[i] = extensions[i]
+        end
+    end
+
+    return next(info) and info or nil
+end
+
+local function collect_defold_graphics_info()
+    local graphics_module = rawget(_G, "graphics")
+    if type(graphics_module) ~= "table" then
+        return nil
+    end
+
+    local adapter_info = safe_call(graphics_module.get_adapter_info)
+    if type(adapter_info) ~= "table" then
+        return nil
+    end
+
+    return adapter_info
+end
+
+local function collect_native_gpu_info()
+    local native_module = rawget(_G, "sentinel_native")
+    if type(native_module) ~= "table" then
+        return nil
+    end
+
+    local gpu_info = safe_call(native_module.get_gpu_info)
+    if type(gpu_info) ~= "table" then
+        return nil
+    end
+
+    return gpu_info
+end
+
+local function make_gpu_context(adapter_info, native_info)
+    local context = {}
+    native_info = type(native_info) == "table" and native_info or {}
+
+    set_present_field(context, "name", native_info.name or native_info.renderer)
+    set_present_field(context, "vendor_name", native_info.vendor_name)
+    set_present_field(context, "vendor_id", native_info.vendor_id)
+    set_present_field(context, "id", native_info.id or native_info.device_id)
+    set_present_field(context, "device_id", native_info.device_id)
+    set_present_field(context, "version", native_info.version or make_adapter_version(adapter_info))
+    set_present_field(context, "driver_version", native_info.driver_version)
+    set_present_field(context, "api_type", native_info.api_type or adapter_family_to_api_type(adapter_info and adapter_info.family))
+    set_present_field(context, "memory_size", native_info.memory_size)
+    set_present_field(context, "graphics_shader_level", native_info.graphics_shader_level)
+
+    if type(adapter_info) == "table" then
+        if type(adapter_info.limits) == "table" then
+            set_present_field(context, "max_texture_size", adapter_info.limits.max_texture_size_2d)
+        end
+
+        local graphics_module = rawget(_G, "graphics")
+        local features = adapter_info.features
+        local compute_id = type(graphics_module) == "table" and graphics_module.CONTEXT_FEATURE_COMPUTE_SHADER or nil
+        local instancing_id = type(graphics_module) == "table" and graphics_module.CONTEXT_FEATURE_INSTANCING or nil
+        set_present_field(context, "supports_compute_shaders", has_feature(features, compute_id))
+        set_present_field(context, "supports_draw_call_instancing", has_feature(features, instancing_id))
+    end
+
+    return next(context) and context or nil
+end
+
+local function collect_gpu_info()
+    if type(M.config) == "table" and M.config.collect_gpu_info == false then
+        return nil
+    end
+
+    local adapter_info = collect_defold_graphics_info()
+    local native_info = collect_native_gpu_info()
+    local gpu_context = make_gpu_context(adapter_info, native_info)
+    local defold_graphics = copy_defold_graphics_info(adapter_info)
+
+    if not gpu_context and not defold_graphics then
+        return nil
+    end
+
+    return {
+        context = gpu_context,
+        defold_graphics = defold_graphics
+    }
+end
+
+local function apply_gpu_info(event)
+    local gpu_info = M.gpu_info
+    if type(gpu_info) ~= "table" then
+        return
+    end
+
+    if type(gpu_info.context) == "table" and next(gpu_info.context) ~= nil then
+        event.contexts = event.contexts or {}
+        event.contexts.gpu = copy_table(gpu_info.context)
+
+        set_tag_field(event.tags, "gpu.api_type", gpu_info.context.api_type)
+        set_tag_field(event.tags, "gpu.vendor_name", gpu_info.context.vendor_name)
+        set_tag_field(event.tags, "gpu.vendor_id", gpu_info.context.vendor_id)
+    end
+
+    if type(gpu_info.defold_graphics) == "table" and next(gpu_info.defold_graphics) ~= nil then
+        event.extra = event.extra or {}
+        event.extra.defold_graphics = copy_table(gpu_info.defold_graphics)
+    end
 end
 
 local function get_crash_sys_fields()
@@ -736,6 +965,8 @@ local function new_event()
         }
     end
 
+    apply_gpu_info(event)
+
     return event
 end
 
@@ -979,6 +1210,8 @@ end
 -- @tparam[opt=false] boolean config.debug Turn on to debug and check what data Sentinel sends
 -- @tparam[opt=false] boolean config.dry_run If true, don't actually send data to Sentry
 -- @tparam[opt=true] boolean config.compress_requests Compress outgoing Sentry requests with deflate
+-- @tparam[opt=true] boolean config.collect_gpu_info Collect Defold/native GPU context once during init
+-- @tparam[opt=128] number config.gpu_extensions_limit Maximum number of graphics extensions stored in event.extra.defold_graphics
 -- @tparam[opt=false] boolean config.gameanalytics Whether to duplicate errors to GameAnalytics if it's installed
 -- @tparam[opt=30] number config.send_timeout HTTP request timeout
 -- @tparam[opt=true] boolean config.set_error_handler Install a custom Lua error handler
@@ -1013,6 +1246,12 @@ function M.init(config)
     if type(M.config.compress_requests) ~= "boolean" then
         M.config.compress_requests = true
     end
+    if type(M.config.collect_gpu_info) ~= "boolean" then
+        M.config.collect_gpu_info = true
+    end
+    if type(M.config.gpu_extensions_limit) ~= "number" then
+        M.config.gpu_extensions_limit = DEFAULT_GPU_EXTENSIONS_LIMIT
+    end
     if type(M.config.crash_extra_text_limit) ~= "number" then
         M.config.crash_extra_text_limit = DEFAULT_CRASH_EXTRA_TEXT_LIMIT
     end
@@ -1029,6 +1268,7 @@ function M.init(config)
 
     M.config.extra = M.config.extra or {}
     M.config.tags = M.config.tags or {}
+    M.gpu_info = collect_gpu_info()
 
     if M.config.set_error_handler then
         sys.set_error_handler(error_handler)
