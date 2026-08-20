@@ -18,6 +18,7 @@ Sentry.io is a paid system, but it has a free plan for developers to track up to
 | Browser (HTML5) | Loads JavaScript SDK to track non-Lua errors ☑️ |
 | Defold native crash dumps | Reports previous crash dumps through Defold's `crash` API when available |
 | GPU context | Adds portable Defold adapter data and best-effort desktop native GPU fields |
+| Device context | Adds best-effort desktop CPU/RAM fields to `contexts.device` |
 | Native minidump/Crashpad-style capture and full symbolication | Not Implemented ❌ |
 
 ## Installation & Usage
@@ -51,6 +52,9 @@ function init(self)
         -- Adds contexts.gpu and extra.defold_graphics to every event.
         collect_gpu_info = sys.get_config_boolean("sentinel.sentry_collect_gpu_info", true),
         gpu_extensions_limit = sys.get_config_number("sentinel.sentry_gpu_extensions_limit", 128),
+
+        -- Adds contexts.device CPU/RAM data to every event.
+        collect_device_info = sys.get_config_boolean("sentinel.sentry_collect_device_info", true),
 
         -- Tags and extra data are optional
         tags = {
@@ -193,7 +197,7 @@ Previous Defold native crash reports are sent as fatal exception events with:
 - message: `Previous Defold native crash`
 - tag `kind = "defold_crash"`
 - tag `platform = sys.get_sys_info().system_name`
-- the same cached GPU context used by normal Lua events
+- the same cached device and GPU context used by normal Lua events
 - native stack frames generated from `crash.get_backtrace()`
 - module-relative frame keys generated from `crash.get_modules()`
 - a native crash fingerprint based on project, release, environment, signal, and top native frames
@@ -211,6 +215,14 @@ Verbose Defold adapter data is stored in `extra.defold_graphics`: `family`, `ver
 
 Sentinel only adds low-cardinality GPU tags: `gpu.api_type`, `gpu.vendor_name`, and `gpu.vendor_id`. Full renderer names are not tagged unless your app adds its own tag.
 
+### Device Context
+
+By default, Sentinel collects best-effort desktop CPU/RAM information through `sentinel_native.get_device_info()` during `sentry.init()` and attaches it to every event as `contexts.device`.
+
+Device fields follow Sentry's device context schema when available: `arch`, `memory_size`, `free_memory`, `processor_count`, `cpu_description`, and `processor_frequency`. `memory_size` and `free_memory` are bytes. Static fields are cached during init; `free_memory` is refreshed when each event is created, so previous native-crash reports contain current startup memory rather than historical crash-time memory.
+
+Sentinel does not add CPU/RAM tags. Set `collect_device_info = false` to disable this collection.
+
 ### Configuration Options
 
 `sentry.init()` accepts:
@@ -223,6 +235,7 @@ Sentinel only adds low-cardinality GPU tags: `gpu.api_type`, `gpu.vendor_name`, 
     compress_requests = true,
     collect_gpu_info = true,
     gpu_extensions_limit = 128,
+    collect_device_info = true,
     gameanalytics = false,
     send_timeout = 30,
     set_error_handler = true,
@@ -284,6 +297,7 @@ sentry_send_timeout = 10
 sentry_load_previous_crash = 1
 sentry_collect_gpu_info = 1
 sentry_gpu_extensions_limit = 128
+sentry_collect_device_info = 1
 
 # Optional overrides
 # sentry_release = my_game@1.0.0
@@ -302,6 +316,9 @@ compression.
 
 Sentinel collects GPU context by default. Set `collect_gpu_info = false` in `sentry.init()` to disable it, or lower
 `gpu_extensions_limit` if you want smaller event payloads.
+
+Sentinel collects desktop CPU/RAM device context by default. Set `collect_device_info = false` in `sentry.init()` to
+disable it.
 
 ### Desktop Test Script
 

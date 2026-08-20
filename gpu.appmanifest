@@ -40,21 +40,21 @@ platforms:
       jetifier: true
   arm64-osx:
     context:
-      excludeLibs: [physics, LinearMath, BulletDynamics, BulletCollision, box2d_defold, script_box2d_defold, gamesys_model, gamesys_rig, rig, record, vpx, graphics_metal, graphics_vulkan, platform_vulkan, MoltenVK]
-      excludeSymbols: [ScriptBox2DExt, ScriptModelExt, GraphicsAdapterMetal, GraphicsAdapterVulkan]
-      symbols: [GraphicsAdapterOpenGL]
-      libs: [physics_null, gamesys_rig_null, gamesys_model_null, rig_null, record_null, graphics, platform]
-      engineLibs: []
-      frameworks: [OpenGL]
+      excludeLibs: [physics, LinearMath, BulletDynamics, BulletCollision, box2d_defold, script_box2d_defold, gamesys_model, gamesys_rig, rig, record, vpx, graphics, graphics_vulkan, platform_vulkan, MoltenVK]
+      excludeSymbols: [ScriptBox2DExt, ScriptModelExt, GraphicsAdapterOpenGL, GraphicsAdapterVulkan]
+      symbols: [GraphicsAdapterMetal]
+      libs: [physics_null, gamesys_rig_null, gamesys_model_null, rig_null, record_null, graphics_metal]
+      engineLibs: [platform]
+      frameworks: [Metal, IOSurface, QuartzCore]
       linkFlags: []
   x86_64-osx:
     context:
-      excludeLibs: [physics, LinearMath, BulletDynamics, BulletCollision, box2d_defold, script_box2d_defold, gamesys_model, gamesys_rig, rig, record, vpx, graphics_metal, graphics_vulkan, platform_vulkan, MoltenVK]
-      excludeSymbols: [ScriptBox2DExt, ScriptModelExt, GraphicsAdapterMetal, GraphicsAdapterVulkan]
-      symbols: [GraphicsAdapterOpenGL]
-      libs: [physics_null, gamesys_rig_null, gamesys_model_null, rig_null, record_null, graphics, platform]
-      engineLibs: []
-      frameworks: [OpenGL]
+      excludeLibs: [physics, LinearMath, BulletDynamics, BulletCollision, box2d_defold, script_box2d_defold, gamesys_model, gamesys_rig, rig, record, vpx, graphics, graphics_vulkan, platform_vulkan, MoltenVK]
+      excludeSymbols: [ScriptBox2DExt, ScriptModelExt, GraphicsAdapterOpenGL, GraphicsAdapterVulkan]
+      symbols: [GraphicsAdapterMetal]
+      libs: [physics_null, gamesys_rig_null, gamesys_model_null, rig_null, record_null, graphics_metal]
+      engineLibs: [platform]
+      frameworks: [Metal, IOSurface, QuartzCore]
       linkFlags: []
   x86_64-linux:
     context:

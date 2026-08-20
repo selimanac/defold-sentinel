@@ -9,10 +9,10 @@ platforms:
             frameworks: ["Foundation", "Metal", "OpenGL"]
     x86_64-win32:
         context:
-            libs: ["dxgi", "opengl32"]
+            libs: ["advapi32", "dxgi", "opengl32"]
     x86-win32:
         context:
-            libs: ["dxgi", "opengl32"]
+            libs: ["advapi32", "dxgi", "opengl32"]
     x86_64-linux:
         context:
             libs: ["GL"]

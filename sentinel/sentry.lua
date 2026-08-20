@@ -373,6 +373,59 @@ local function collect_native_gpu_info()
     return gpu_info
 end
 
+local function collect_native_device_info()
+    local native_module = rawget(_G, "sentinel_native")
+    if type(native_module) ~= "table" then
+        return nil
+    end
+
+    local device_info = safe_call(native_module.get_device_info)
+    if type(device_info) ~= "table" then
+        return nil
+    end
+
+    return device_info
+end
+
+local function make_device_context(native_info, include_free_memory)
+    if type(native_info) ~= "table" then
+        return nil
+    end
+
+    local context = {}
+    set_present_field(context, "arch", native_info.arch)
+    set_present_field(context, "memory_size", native_info.memory_size)
+    set_present_field(context, "processor_count", native_info.processor_count)
+    set_present_field(context, "cpu_description", native_info.cpu_description)
+    set_present_field(context, "processor_frequency", native_info.processor_frequency)
+    if include_free_memory ~= false then
+        set_present_field(context, "free_memory", native_info.free_memory)
+    end
+
+    return next(context) and context or nil
+end
+
+local function collect_device_info()
+    if type(M.config) == "table" and M.config.collect_device_info == false then
+        return nil
+    end
+
+    return make_device_context(collect_native_device_info(), false)
+end
+
+local function refresh_device_free_memory()
+    if type(M.config) == "table" and M.config.collect_device_info == false then
+        return nil
+    end
+
+    local native_info = collect_native_device_info()
+    if type(native_info) ~= "table" then
+        return nil
+    end
+
+    return native_info.free_memory
+end
+
 local function make_gpu_context(adapter_info, native_info)
     local context = {}
     native_info = type(native_info) == "table" and native_info or {}
@@ -422,6 +475,21 @@ local function collect_gpu_info()
         context = gpu_context,
         defold_graphics = defold_graphics
     }
+end
+
+local function apply_device_info(event)
+    if type(M.device_info) ~= "table" then
+        return
+    end
+
+    local device_context = copy_table(M.device_info)
+    set_present_field(device_context, "free_memory", refresh_device_free_memory())
+    if next(device_context) == nil then
+        return
+    end
+
+    event.contexts = event.contexts or {}
+    event.contexts.device = device_context
 end
 
 local function apply_gpu_info(event)
@@ -965,6 +1033,7 @@ local function new_event()
         }
     end
 
+    apply_device_info(event)
     apply_gpu_info(event)
 
     return event
@@ -1212,6 +1281,7 @@ end
 -- @tparam[opt=true] boolean config.compress_requests Compress outgoing Sentry requests with deflate
 -- @tparam[opt=true] boolean config.collect_gpu_info Collect Defold/native GPU context once during init
 -- @tparam[opt=128] number config.gpu_extensions_limit Maximum number of graphics extensions stored in event.extra.defold_graphics
+-- @tparam[opt=true] boolean config.collect_device_info Collect native CPU/RAM device context
 -- @tparam[opt=false] boolean config.gameanalytics Whether to duplicate errors to GameAnalytics if it's installed
 -- @tparam[opt=30] number config.send_timeout HTTP request timeout
 -- @tparam[opt=true] boolean config.set_error_handler Install a custom Lua error handler
@@ -1252,6 +1322,9 @@ function M.init(config)
     if type(M.config.gpu_extensions_limit) ~= "number" then
         M.config.gpu_extensions_limit = DEFAULT_GPU_EXTENSIONS_LIMIT
     end
+    if type(M.config.collect_device_info) ~= "boolean" then
+        M.config.collect_device_info = true
+    end
     if type(M.config.crash_extra_text_limit) ~= "number" then
         M.config.crash_extra_text_limit = DEFAULT_CRASH_EXTRA_TEXT_LIMIT
     end
@@ -1268,6 +1341,7 @@ function M.init(config)
 
     M.config.extra = M.config.extra or {}
     M.config.tags = M.config.tags or {}
+    M.device_info = collect_device_info()
     M.gpu_info = collect_gpu_info()
 
     if M.config.set_error_handler then

@@ -30,6 +30,7 @@ sentry_send_timeout = 10
 sentry_load_previous_crash = 1
 sentry_collect_gpu_info = 1
 sentry_gpu_extensions_limit = 128
+sentry_collect_device_info = 1
 
 [input]
 game_binding = /builtins/input/all.input_bindingc
