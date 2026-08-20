@@ -23,7 +23,31 @@ local DEFAULT_CRASH_USER_FIELD_MAX   = 32
 local DEFAULT_GPU_EXTENSIONS_LIMIT   = 128
 local CRASH_FINGERPRINT_FRAME_LIMIT  = 6
 
-local state                          = {
+-- Tags derived from APP_PATH/ENGINE_INFO/SYS_INFO never change for the life of the process, so they're computed once here instead of on every event.
+local STATIC_TAGS                    = {}
+do
+    if string.len(APP_PATH) > 0 then
+        STATIC_TAGS["application_path"] = APP_PATH
+    end
+
+    for k, v in pairs(ENGINE_INFO) do
+        local s = tostring(v)
+        if string.len(s) > 0 then
+            STATIC_TAGS["engine_info." .. k] = s
+        end
+    end
+
+    for k, v in pairs(SYS_INFO) do
+        local s = tostring(v)
+        if string.len(s) > 0 and k ~= "system_version" then
+            STATIC_TAGS["sys_info." .. k] = s
+        end
+    end
+
+    STATIC_TAGS["project.version"] = sys.get_config_string("project.version")
+end
+
+local state = {
     initialized             = false,
     previous_crash_checked  = false,
     previous_crash_found    = false,
@@ -140,7 +164,7 @@ local function encode_extra(value)
         return trim_text(encoded, get_crash_extra_text_limit())
     end
 
-    return trim_text(encoded, get_crash_extra_text_limit())
+    return trim_text("encode failed: " .. tostring(encoded), get_crash_extra_text_limit())
 end
 
 local function wrap_capture_callback(callback)
@@ -955,10 +979,15 @@ local function request_callback(next)
     return function(self, id, resp)
         if type(resp) == "table" and resp.status == 200 then
             local ok, retval = pcall(json.decode, resp.response)
-            if ok then
+            if ok and type(retval) == "table" then
                 -- valid response
                 if next then
                     next(retval.id, nil)
+                end
+            elseif ok then
+                -- decoded, but not the expected shape
+                if next then
+                    next(nil, "Unexpected response body")
                 end
             else
                 -- error
@@ -996,27 +1025,9 @@ local function new_event()
     event.tags = {}
     event.extra = {}
 
-    if string.len(APP_PATH) > 0 then
-        event.tags["application_path"] = APP_PATH
+    for k, v in pairs(STATIC_TAGS) do
+        event.tags[k] = v
     end
-
-    for k, v in pairs(ENGINE_INFO) do
-        local s = tostring(v)
-        if string.len(s) > 0 then
-            event.tags["engine_info." .. k] = s
-        end
-    end
-
-    for k, v in pairs(SYS_INFO) do
-        local s = tostring(v)
-        if string.len(s) > 0 then
-            if k ~= "system_version" then
-                event.tags["sys_info." .. k] = s
-            end
-        end
-    end
-
-    event.tags["project.version"] = sys.get_config_string("project.version")
 
     if html5 then
         event.request = {
@@ -1335,7 +1346,7 @@ function M.init(config)
     --
     local err
     M.obj, err = parse_dsn(M.config.dsn)
-    assert(err == nil, "Invalid the DSN url.")
+    assert(M.obj ~= nil, "Invalid DSN url: " .. tostring(err))
 
     M.transactions = {}
 
@@ -1451,7 +1462,9 @@ end
 -- }
 -- sentry.capture_exception(err)
 function M.capture_exception(err)
-    assert(type(M.config) == "table", "initialize first")
+    if type(M.config) ~= "table" then
+        return false, "initialize first"
+    end
     assert(type(err) == "table", "`capture_exception` expects a table.")
     err = clone_event(err)
     local callback = wrap_capture_callback(err.callback)
@@ -1495,7 +1508,7 @@ function M.capture_exception(err)
     }
     event.fingerprint = make_exception_fingerprint(err, exception)
 
-    event.tags["source"] = err.source
+    set_tag_field(event.tags, "source", err.source)
 
     merge_kv(event.tags, M.config.tags)
     merge_kv(event.extra, M.config.extra)
@@ -1511,7 +1524,18 @@ function M.capture_exception(err)
         event.extra = nil
     end
 
-    local json_str = json.encode(event)
+    local encode_ok, json_str = pcall(json.encode, event)
+    if not encode_ok then
+        local message = "Event encode failed: " .. tostring(json_str)
+        if err.callback then
+            callback(nil, message)
+        else
+            set_status("Sentry send failed: " .. message, false)
+            log_print("Dropping the message, event encode failed.")
+        end
+        return false, message
+    end
+
     if M.config.debug then
         log_print("JSON payload " .. json_str)
     end
@@ -1541,7 +1565,9 @@ end
 --     callback = function(id, err) print(id, err) end
 -- })
 function M.capture_message(msg)
-    assert(type(M.config) == "table", "initialize first")
+    if type(M.config) ~= "table" then
+        return false, "initialize first"
+    end
     assert(type(msg) == "table", "`capture_message` expects a table.")
     msg = clone_event(msg)
     local callback = wrap_capture_callback(msg.callback)
@@ -1576,7 +1602,18 @@ function M.capture_message(msg)
         event.extra = nil
     end
 
-    local json_str = json.encode(event)
+    local encode_ok, json_str = pcall(json.encode, event)
+    if not encode_ok then
+        local message = "Event encode failed: " .. tostring(json_str)
+        if msg.callback then
+            callback(nil, message)
+        else
+            set_status("Sentry send failed: " .. message, false)
+            log_print("Dropping the message, event encode failed.")
+        end
+        return false, message
+    end
+
     if M.config.debug then
         log_print("JSON payload " .. json_str)
     end
