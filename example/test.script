@@ -251,11 +251,13 @@ function init(self)
 	msg.post("@render:", "use_fixed_fit_projection", { near = -1, far = 1 })
 	msg.post(".", "acquire_input_focus")
 
-	pprint(sentinel_native.get_gpu_info())
-	pprint(sentinel_native.get_device_info())
+
 
 	show_controls()
 	init_sentry()
+
+	pprint(sentinel_native.get_gpu_info())
+	pprint(sentinel_native.get_device_info())
 end
 
 function final(self)
