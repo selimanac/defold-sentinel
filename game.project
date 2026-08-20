@@ -1,5 +1,5 @@
 [bootstrap]
-main_collection = /example/main.collectionc
+main_collection = /example/test.collectionc
 
 [display]
 width = 960
@@ -20,8 +20,14 @@ scale_mode = fit
 cssfile = /builtins/manifests/web/dark_theme.css
 
 [sentinel]
-sentry_dsn_html5 = https://a09cb15ea1224b7db88ff3681c0d574f@o43904.ingest.sentry.io/5395416
-sentry_release = sentinel@1.0.0
+sentry_dsn = https://55836b9c3acd4fdf8cc71c5ec660cae9@app.glitchtip.com/27061
+sentry_dsn_html5 = https://55836b9c3acd4fdf8cc71c5ec660cae9@app.glitchtip.com/27061
+sentry_environment = sandbox
+sentry_enabled = 1
+sentry_debug = 1
+sentry_dry_run = 0
+sentry_send_timeout = 10
+sentry_load_previous_crash = 1
 
 [input]
 game_binding = /builtins/input/all.input_bindingc

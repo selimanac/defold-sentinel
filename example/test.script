@@ -1,0 +1,286 @@
+local sentry = require("sentinel.sentry")
+
+local CONFIG = {
+	DSN = "sentinel.sentry_dsn",
+	RELEASE = "sentinel.sentry_release",
+	BUILD_ID = "sentinel.sentry_build_id",
+	ENVIRONMENT = "sentinel.sentry_environment",
+	ENABLED = "sentinel.sentry_enabled",
+	DEBUG = "sentinel.sentry_debug",
+	DRY_RUN = "sentinel.sentry_dry_run",
+	SEND_TIMEOUT = "sentinel.sentry_send_timeout",
+	LOAD_PREVIOUS_CRASH = "sentinel.sentry_load_previous_crash"
+}
+
+local DEFAULT_ENVIRONMENT = "sandbox"
+local DEFAULT_SEND_TIMEOUT = 10
+
+local CRASH_USER_FIELD = {
+	RELEASE = "release",
+	ENVIRONMENT = "environment",
+	LAST_EVENT = "last_event",
+	BUILD_ID = "build_id"
+}
+
+local function safe_call(fn, ...)
+	if type(fn) ~= "function" then
+		return nil
+	end
+
+	local ok, value = pcall(fn, ...)
+	if ok then
+		return value
+	end
+
+	return nil
+end
+
+local function set_label(text)
+	safe_call(label.set_text, "#hello", text)
+end
+
+local function set_status(text)
+	print("SENTRY TEST: " .. tostring(text))
+	set_label(text)
+end
+
+local function get_release()
+	local release = sys.get_config_string(CONFIG.RELEASE, "")
+	if release ~= "" then
+		return release
+	end
+
+	local title = sys.get_config_string("project.title", "")
+	local version = sys.get_config_string("project.version", "0.0.0")
+	if title ~= "" then
+		return title .. "@" .. version
+	end
+
+	return version
+end
+
+local function get_build_id()
+	return sys.get_config_string(CONFIG.BUILD_ID, "")
+end
+
+local function get_environment()
+	return sys.get_config_string(CONFIG.ENVIRONMENT, DEFAULT_ENVIRONMENT)
+end
+
+local function make_capture_callback(label_text)
+	return function(id, err)
+		if err then
+			set_status(label_text .. " failed: " .. tostring(err))
+			return
+		end
+
+		set_status(label_text .. " sent: " .. tostring(id))
+	end
+end
+
+local function set_last_event(event_name)
+	local build_id = get_build_id()
+
+	sentry.set_crash_user_field(CRASH_USER_FIELD.RELEASE, get_release())
+	sentry.set_crash_user_field(CRASH_USER_FIELD.ENVIRONMENT, get_environment())
+	sentry.set_crash_user_field(CRASH_USER_FIELD.LAST_EVENT, event_name)
+	sentry.set_crash_user_field(CRASH_USER_FIELD.BUILD_ID, build_id)
+
+	if sentry.is_initialized() then
+		sentry.set_tag("last_event", event_name)
+		if build_id ~= "" then
+			sentry.set_tag("build_id", build_id)
+		end
+	end
+end
+
+local function print_sentry_state()
+	local ok, encoded = pcall(json.encode, sentry.get_state())
+	if ok then
+		print("SENTRY TEST STATE: " .. encoded)
+	else
+		print("SENTRY TEST STATE: <encode failed>")
+	end
+end
+
+local function init_sentry()
+	if sentry.is_initialized() then
+		return true
+	end
+
+	if not sys.get_config_boolean(CONFIG.ENABLED, false) then
+		set_status("Sentry disabled by game.project")
+		return false
+	end
+
+	local dsn = sys.get_config_string(CONFIG.DSN, "")
+	if dsn == "" then
+		set_status("Sentry DSN missing in game.project")
+		return false
+	end
+
+	print("SENTRY TEST CONFIG: using " .. CONFIG.DSN)
+
+	local configured_release = sys.get_config_string(CONFIG.RELEASE, "")
+	local build_id    = get_build_id()
+	local environment = get_environment()
+	local sys_info    = sys.get_sys_info({ ignore_secure = true }) or {}
+	local config      = {
+		dsn                    = dsn,
+		debug                  = sys.get_config_boolean(CONFIG.DEBUG, false),
+		dry_run                = sys.get_config_boolean(CONFIG.DRY_RUN, false),
+		set_error_handler      = true,
+		load_previous_crash    = sys.get_config_boolean(CONFIG.LOAD_PREVIOUS_CRASH, true),
+		send_timeout           = sys.get_config_number(CONFIG.SEND_TIMEOUT, DEFAULT_SEND_TIMEOUT),
+		environment            = environment,
+		crash_user_field_names = {
+				release     = 0,
+				environment = 1,
+				last_event  = 4,
+				build_id    = 5
+			},
+			previous_crash_event   = {
+				callback = make_capture_callback("Previous native crash")
+			},
+			tags                   = {
+				kind     = "sentinel_desktop_test",
+				runtime  = "defold_lua",
+				platform = tostring(sys_info.system_name)
+			},
+			extra                  = {
+				project_title   = sys.get_config_string("project.title", ""),
+				project_version = sys.get_config_string("project.version", "")
+			}
+	}
+
+	if build_id ~= "" then
+		config.tags.build_id = build_id
+	end
+	if configured_release ~= "" then
+		config.release = configured_release
+	end
+
+	local ok, err = pcall(sentry.init, config)
+	if not ok then
+		set_status("Sentry init failed: " .. tostring(err))
+		return false
+	end
+
+	set_last_event("sentry_test_initialized")
+	set_status("Sentry test initialized")
+	print_sentry_state()
+	return true
+end
+
+-- DEBUG
+local function capture_test_message()
+	set_last_event("debug_sentry_message")
+	sentry.add_breadcrumb({ category = "debug", message = "Sending Sentry test message" })
+
+	local ok, err = pcall(sentry.capture_message, {
+		message  = "Sentry debug test message",
+		level    = "info",
+		tags     = {
+			kind = "sentry_test"
+		},
+		callback = make_capture_callback("Sentry test message")
+	})
+
+	if not ok then
+		set_status("Sentry message capture failed: " .. tostring(err))
+		return false
+	end
+
+	return true
+end
+
+-- DEBUG
+local function trigger_test_lua_error()
+	set_last_event("debug_lua_error")
+	sentry.add_breadcrumb({ category = "debug", message = "Triggering Sentry Lua error test" })
+	set_status("Sentry Lua error test scheduled")
+
+	timer.delay(0.1, false, function()
+		error("Sentry debug Lua error", 2)
+	end)
+	return true
+end
+
+-- DEBUG
+local function write_test_crash_dump()
+	set_last_event("debug_crash_write_dump")
+
+	local ok, err = sentry.write_crash_dump()
+	if ok then
+		set_status("Native crash dump written. Restart app to report it.")
+		return true
+	end
+
+	set_status("Native crash dump failed: " .. tostring(err))
+	return false
+end
+
+-- DEBUG
+local function report_previous_crash()
+	set_last_event("debug_report_previous_crash")
+
+	local ok, err = sentry.report_previous_crash({
+		callback = make_capture_callback("Previous native crash")
+	})
+	if ok then
+		set_status("Previous native crash report requested")
+		return true
+	end
+
+	set_status("Previous native crash not reported: " .. tostring(err))
+	return false
+end
+
+local function show_controls()
+	set_label("Sentinel test: M message, E Lua error, D crash dump, R report crash, S state")
+	print("SENTRY TEST CONTROLS: M message, E Lua error, D crash dump, R report crash, S state")
+end
+
+function init(self)
+	msg.post("@render:", "use_fixed_fit_projection", { near = -1, far = 1 })
+	msg.post(".", "acquire_input_focus")
+
+	show_controls()
+	init_sentry()
+end
+
+function final(self)
+end
+
+function update(self, dt)
+end
+
+function on_message(self, message_id, message, sender)
+end
+
+function on_input(self, action_id, action)
+	if action_id == hash("touch") and action.released then
+		capture_test_message()
+		return
+	end
+
+	if not action.pressed then
+		return
+	end
+
+	if action_id == hash("key_m") then
+		capture_test_message()
+	elseif action_id == hash("key_e") then
+		trigger_test_lua_error()
+	elseif action_id == hash("key_d") then
+		write_test_crash_dump()
+	elseif action_id == hash("key_r") then
+		report_previous_crash()
+	elseif action_id == hash("key_s") then
+		print_sentry_state()
+	end
+end
+
+function on_reload(self)
+	print_sentry_state()
+end

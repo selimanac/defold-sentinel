@@ -6,16 +6,32 @@
 -- SDK Development Documentation: https://develop.sentry.dev/sdk/overview/
 --
 
-local M           = {}
+local M                              = {}
 
-local LOG_PREFIX  = "SENTINEL: "
-local LOGGER_NAME = "sentinel"
-local VERSION     = "1.3.1"
-local USER_AGENT  = "sentinel-sentry/" .. VERSION
+local LOG_PREFIX                     = "SENTINEL: "
+local LOGGER_NAME                    = "sentinel"
+local VERSION                        = "1.3.2"
+local USER_AGENT                     = "sentinel-sentry/" .. VERSION
 
-local APP_PATH    = sys.get_application_path()
-local ENGINE_INFO = sys.get_engine_info()
-local SYS_INFO    = sys.get_sys_info({ ignore_secure = true })
+local APP_PATH                       = sys.get_application_path()
+local ENGINE_INFO                    = sys.get_engine_info()
+local SYS_INFO                       = sys.get_sys_info({ ignore_secure = true })
+
+local DEFAULT_CRASH_EXTRA_TEXT_LIMIT = 8192
+local DEFAULT_CRASH_USER_FIELD_SIZE  = 255
+local DEFAULT_CRASH_USER_FIELD_MAX   = 32
+local CRASH_FINGERPRINT_FRAME_LIMIT  = 6
+
+local state                          = {
+    initialized             = false,
+    previous_crash_checked  = false,
+    previous_crash_found    = false,
+    previous_crash_reported = false,
+    last_status             = "Not initialized",
+    last_status_success     = false,
+    last_event_id           = nil,
+    last_error              = nil
+}
 
 --- Generates a unique event ID suitable for use in Sentry.
 -- This function creates a 32-character hexadecimal string based on the current time and random numbers.
@@ -38,6 +54,115 @@ local function log_print(v)
     end
 end
 
+local function set_status(text, success)
+    state.last_status = text
+    state.last_status_success = success
+    if success then
+        state.last_error = nil
+    else
+        state.last_error = text
+    end
+end
+
+local function safe_call(fn, ...)
+    if type(fn) ~= "function" then
+        return nil, "function unavailable"
+    end
+
+    local ok, value = pcall(fn, ...)
+    if ok then
+        return value, nil
+    end
+
+    return nil, value
+end
+
+local function trim_text(value, limit)
+    if value == nil then
+        return nil
+    end
+
+    local text = tostring(value)
+    if string.len(text) <= limit then
+        return text
+    end
+
+    return string.sub(text, 1, limit) .. "...(truncated)"
+end
+
+local function get_crash_extra_text_limit()
+    if type(M.config) == "table" and type(M.config.crash_extra_text_limit) == "number" then
+        return M.config.crash_extra_text_limit
+    end
+
+    return DEFAULT_CRASH_EXTRA_TEXT_LIMIT
+end
+
+local function get_crash_user_field_size()
+    if type(crash) == "table" and type(crash.USERFIELD_SIZE) == "number" then
+        return crash.USERFIELD_SIZE
+    end
+
+    return DEFAULT_CRASH_USER_FIELD_SIZE
+end
+
+local function get_crash_user_field_max()
+    if type(crash) == "table" and type(crash.USERFIELD_MAX) == "number" then
+        return crash.USERFIELD_MAX
+    end
+
+    return DEFAULT_CRASH_USER_FIELD_MAX
+end
+
+local function make_default_release()
+    local title = sys.get_config_string("project.title", "")
+    local version = sys.get_config_string("project.version", "")
+
+    if title ~= "" and version ~= "" then
+        return title .. "@" .. version
+    end
+
+    if title ~= "" then
+        return title
+    end
+
+    if version ~= "" then
+        return version
+    end
+
+    return nil
+end
+
+local function encode_extra(value)
+    local ok, encoded = pcall(json.encode, value)
+    if ok then
+        return trim_text(encoded, get_crash_extra_text_limit())
+    end
+
+    return trim_text(encoded, get_crash_extra_text_limit())
+end
+
+local function wrap_capture_callback(callback)
+    return function(id, err)
+        if err then
+            set_status("Sentry send failed: " .. tostring(err), false)
+        else
+            state.last_event_id = id
+            set_status("Sentry event sent: " .. tostring(id), true)
+        end
+
+        if callback then
+            local ok, callback_err = pcall(callback, id, err)
+            if not ok then
+                if type(M.config) == "table" and M.config.debug then
+                    log_print("Capture callback error " .. tostring(callback_err))
+                end
+                set_status("Sentry callback failed: " .. tostring(callback_err), false)
+            end
+        end
+    end
+end
+
 --- Merges key-value pairs from `src` table into `dest`. Copies non-empty string values from src to dest.
 -- @tparam table dest The destination table to merge into.
 -- @tparam table src The source table to merge from if not nil.
@@ -50,6 +175,402 @@ local function merge_kv(dest, src)
             end
         end
     end
+end
+
+local function clone_event(event)
+    local cloned = {}
+    if not event then
+        return cloned
+    end
+
+    for key, value in pairs(event) do
+        cloned[key] = value
+    end
+    return cloned
+end
+
+local function copy_kv(dest, src)
+    if type(src) ~= "table" then
+        return
+    end
+
+    for key, value in pairs(src) do
+        dest[key] = value
+    end
+end
+
+local function apply_event_overrides(event, overrides)
+    if type(overrides) ~= "table" then
+        return
+    end
+
+    for key, value in pairs(overrides) do
+        if key ~= "tags" and key ~= "extra" then
+            event[key] = value
+        end
+    end
+
+    event.tags = event.tags or {}
+    event.extra = event.extra or {}
+    copy_kv(event.tags, overrides.tags)
+    copy_kv(event.extra, overrides.extra)
+end
+
+local function get_crash_sys_fields()
+    if type(crash) ~= "table" then
+        return {}
+    end
+
+    return {
+        { key = "android_build_fingerprint", field = crash.SYSFIELD_ANDROID_BUILD_FINGERPRINT },
+        { key = "device_language",           field = crash.SYSFIELD_DEVICE_LANGUAGE },
+        { key = "device_model",              field = crash.SYSFIELD_DEVICE_MODEL },
+        { key = "engine_hash",               field = crash.SYSFIELD_ENGINE_HASH },
+        { key = "engine_version",            field = crash.SYSFIELD_ENGINE_VERSION },
+        { key = "language",                  field = crash.SYSFIELD_LANGUAGE },
+        { key = "manufacturer",              field = crash.SYSFIELD_MANUFACTURER },
+        { key = "system_name",               field = crash.SYSFIELD_SYSTEM_NAME },
+        { key = "system_version",            field = crash.SYSFIELD_SYSTEM_VERSION },
+        { key = "territory",                 field = crash.SYSFIELD_TERRITORY }
+    }
+end
+
+local function collect_crash_sys_fields(handle)
+    local fields = {}
+    local sys_fields = get_crash_sys_fields()
+
+    for i = 1, #sys_fields do
+        local item = sys_fields[i]
+        local value = safe_call(crash.get_sys_field, handle, item.field)
+        if value ~= nil and value ~= "" then
+            fields[item.key] = value
+        end
+    end
+
+    return fields
+end
+
+local function collect_crash_user_fields(handle)
+    local fields = {}
+    local max = get_crash_user_field_max()
+
+    for i = 0, max - 1 do
+        local value = safe_call(crash.get_user_field, handle, i)
+        if value ~= nil and value ~= "" then
+            fields[tostring(i)] = value
+        end
+    end
+
+    return fields
+end
+
+local function count_items(value)
+    if type(value) ~= "table" then
+        return 0
+    end
+
+    return #value
+end
+
+local function normalize_hex_address(value)
+    if type(value) == "number" then
+        return string.format("0x%x", value)
+    end
+
+    if type(value) ~= "string" then
+        return nil
+    end
+
+    local hex = string.match(value, "0[xX]([0-9a-fA-F]+)")
+    if not hex then
+        hex = string.match(value, "^%s*([0-9a-fA-F]+)%s*$")
+    end
+
+    if not hex then
+        return nil
+    end
+
+    return "0x" .. string.lower(hex)
+end
+
+local function parse_hex_address(value)
+    if type(value) == "number" then
+        return value
+    end
+
+    local normalized = normalize_hex_address(value)
+    if not normalized then
+        return nil
+    end
+
+    return tonumber(string.sub(normalized, 3), 16)
+end
+
+local function get_module_name(module)
+    if type(module) ~= "table" then
+        return nil
+    end
+
+    return module.name or module.module or module.path or module.filename
+end
+
+local function get_module_address(module)
+    if type(module) ~= "table" then
+        return nil
+    end
+
+    return module.address or module.image_addr or module.base_address
+end
+
+local function find_crash_module(modules, address)
+    if type(modules) ~= "table" or type(address) ~= "number" then
+        return nil, nil
+    end
+
+    local best_module = nil
+    local best_base = nil
+    for i = 1, #modules do
+        local base = parse_hex_address(get_module_address(modules[i]))
+        if base and base <= address and (not best_base or base > best_base) then
+            best_module = modules[i]
+            best_base = base
+        end
+    end
+
+    return best_module, best_base
+end
+
+local function make_native_frame_key(address, modules)
+    local normalized = normalize_hex_address(address)
+    if not normalized then
+        return nil
+    end
+
+    local number_address = parse_hex_address(address)
+    local module, module_base = find_crash_module(modules, number_address)
+    local module_name = get_module_name(module)
+    if module_name and module_base and number_address then
+        local offset = number_address - module_base
+        if offset >= 0 then
+            return tostring(module_name) .. "+" .. string.format("0x%x", offset)
+        end
+    end
+
+    return normalized
+end
+
+local function build_native_crash_frames(backtrace, modules)
+    if type(backtrace) ~= "table" then
+        return nil
+    end
+
+    local frames = {}
+    for i = #backtrace, 1, -1 do
+        local instruction_addr = normalize_hex_address(backtrace[i])
+        if instruction_addr then
+            local number_address = parse_hex_address(backtrace[i])
+            local module, module_base = find_crash_module(modules, number_address)
+            local module_name = get_module_name(module)
+            local frame = {
+                instruction_addr = instruction_addr,
+                ["function"] = make_native_frame_key(backtrace[i], modules) or instruction_addr,
+                in_app = false
+            }
+
+            if module_name then
+                frame.module = tostring(module_name)
+                frame.package = tostring(module_name)
+                frame.filename = tostring(module_name)
+            end
+            if module_base then
+                frame.image_addr = normalize_hex_address(module_base)
+                frame.addr_mode = "abs"
+            end
+
+            table.insert(frames, frame)
+        end
+    end
+
+    if #frames == 0 then
+        return nil
+    end
+
+    return frames
+end
+
+local function build_native_crash_fingerprint(signum, backtrace, modules)
+    local fingerprint = {
+        "native",
+        tostring(sys.get_config_string("project.title") or ""),
+        tostring(M.config and M.config.release or ""),
+        tostring(M.config and M.config.environment or ""),
+        tostring(signum or "")
+    }
+
+    if type(backtrace) == "table" then
+        local added = 0
+        for i = 1, #backtrace do
+            local key = make_native_frame_key(backtrace[i], modules)
+            if key then
+                table.insert(fingerprint, key)
+                added = added + 1
+                if added >= CRASH_FINGERPRINT_FRAME_LIMIT then
+                    break
+                end
+            end
+        end
+    end
+
+    return fingerprint
+end
+
+local function build_crash_report(handle)
+    local backtrace = safe_call(crash.get_backtrace, handle) or {}
+    local modules = safe_call(crash.get_modules, handle) or {}
+    local user_fields = collect_crash_user_fields(handle)
+    local sys_fields = collect_crash_sys_fields(handle)
+    local signum = safe_call(crash.get_signum, handle)
+
+    return {
+        signum = signum,
+        extra_data = trim_text(safe_call(crash.get_extra_data, handle), get_crash_extra_text_limit()),
+        backtrace_json = encode_extra(backtrace),
+        backtrace_count = count_items(backtrace),
+        modules_json = encode_extra(modules),
+        module_count = count_items(modules),
+        sys_fields_json = encode_extra(sys_fields),
+        user_fields_json = encode_extra(user_fields),
+        native_frames = build_native_crash_frames(backtrace, modules),
+        native_fingerprint = build_native_crash_fingerprint(signum, backtrace, modules)
+    }
+end
+
+local function make_crash_report_extra(report)
+    local extra = {}
+    if type(report) ~= "table" then
+        return extra
+    end
+
+    for key, value in pairs(report) do
+        if key ~= "native_frames" and key ~= "native_fingerprint" then
+            extra[key] = value
+        end
+    end
+
+    return extra
+end
+
+local function make_hard_crash_callback_error(report)
+    return {
+        source = "crash",
+        message = "Previous Defold native crash",
+        type = "DefoldNativeCrash",
+        value = "Previous Defold native crash" .. (report and report.signum and (" signal " .. tostring(report.signum)) or ""),
+        traceback = report and report.backtrace_json or nil,
+        stacktrace_frames = report and report.native_frames or nil,
+        fingerprint = report and report.native_fingerprint or nil,
+        event_platform = "c",
+        fatal = true,
+        extra = make_crash_report_extra(report)
+    }
+end
+
+local function add_lua_traceback_frame(frames, filename, line, fn_name)
+    if filename == "[C]" then
+        return
+    end
+
+    local lineno = tonumber(line)
+    local frame = {
+        filename = filename,
+        ["function"] = fn_name or "?",
+        in_app = true
+    }
+
+    if lineno and lineno > 0 then
+        frame.lineno = lineno
+    end
+
+    table.insert(frames, 1, frame)
+end
+
+local function parse_lua_traceback_frames(traceback)
+    if type(traceback) ~= "string" then
+        return nil
+    end
+
+    local frames = {}
+    for line in string.gmatch(traceback, "[^\r\n]+") do
+        local filename, lineno, fn_name = string.match(line, "^%s*(.+):(%-?%d+): in function '([^']+)'")
+        if not filename then
+            filename, lineno, fn_name = string.match(line, "^%s*(.+):(%-?%d+): in function <([^>]+)>")
+        end
+        if not filename then
+            filename, lineno, fn_name = string.match(line, "^%s*(.+):(%-?%d+): in function (.+)$")
+        end
+        if not filename then
+            filename, lineno = string.match(line, "^%s*(.+):(%-?%d+): in main chunk$")
+            fn_name = filename and "main chunk" or nil
+        end
+
+        if filename then
+            add_lua_traceback_frame(frames, filename, lineno, fn_name)
+        end
+    end
+
+    if #frames == 0 then
+        return nil
+    end
+
+    return frames
+end
+
+local function make_exception_value(err)
+    local exception = {
+        type = err.type or err.message or "Error",
+        value = err.value or err.traceback or err.message or "Error",
+        mechanism = err.mechanism or {
+            type = err.source or "generic",
+            handled = not err.fatal
+        }
+    }
+
+    local frames = err.stacktrace_frames
+    if type(frames) ~= "table" then
+        frames = parse_lua_traceback_frames(err.traceback)
+    end
+    if frames then
+        exception.stacktrace = {
+            frames = frames
+        }
+    end
+
+    return exception
+end
+
+local function make_exception_fingerprint(err, exception)
+    if type(err.fingerprint) == "table" then
+        return err.fingerprint
+    end
+
+    if type(err.fingerprint) == "string" then
+        return { err.fingerprint }
+    end
+
+    local frames = exception.stacktrace and exception.stacktrace.frames
+    if type(frames) ~= "table" or #frames == 0 then
+        return nil
+    end
+
+    local frame = frames[#frames]
+    return {
+        "lua",
+        tostring(M.config and M.config.release or ""),
+        tostring(exception.type or "Error"),
+        tostring(frame.filename or ""),
+        tostring(frame["function"] or ""),
+        tostring(frame.lineno or "")
+    }
 end
 
 --- This function helps to throttle the amount of messages your game is sending to not spam Sentry servers.
@@ -135,7 +656,7 @@ end
 -- @usage local callback = request_callback(function(id, err) print(id, err) end)
 local function request_callback(next)
     return function(self, id, resp)
-        if resp.status == 200 then
+        if type(resp) == "table" and resp.status == 200 then
             local ok, retval = pcall(json.decode, resp.response)
             if ok then
                 -- valid response
@@ -145,15 +666,15 @@ local function request_callback(next)
             else
                 -- error
                 if next then
-                    next(nil, "Decode error: " .. retval)
+                    next(nil, "Decode error: " .. tostring(retval))
                 end
             end
         else
             if M.config.debug then
-                log_print("Invalid request, response status " .. resp.status)
+                log_print("Invalid request, response status " .. tostring(resp and resp.status))
             end
             if next then
-                next(nil, "Response status " .. resp.status)
+                next(nil, "Response status " .. tostring(resp and resp.status))
             end
         end
     end
@@ -278,26 +799,178 @@ local function send(json_str, callback)
         cb_handler(M.obj, "(dry run)", { response = json.encode({ id = "(dry run)" }), status = 200 })
     else
         post_data = compress_post_data(post_data, headers)
+        if M.config.debug then
+            log_print("Sending event to " .. M.obj.server)
+        end
         http.request(url, method, cb_handler, headers, post_data, options)
     end
 end
 
 local function error_handler(source, message, traceback)
-    local error = { source = source, message = message, traceback = traceback }
+    local error = {
+        source = source,
+        message = message,
+        traceback = traceback,
+        mechanism = {
+            type = source or "lua",
+            handled = false
+        }
+    }
     local pstatus, perr = pcall(M.capture_exception, error)
     if not pstatus then
-        log_print("Exception capture error " .. perr)
+        log_print("Exception capture error " .. tostring(perr))
     end
 
     if M.config.on_soft_crash then
         pstatus, perr = pcall(M.config.on_soft_crash, error)
-        log_print("Soft crash callback error " .. perr)
+        if not pstatus then
+            log_print("Soft crash callback error " .. tostring(perr))
+        end
     end
 end
 
 ---
 --- PUBLIC API
 ---
+
+--- Returns whether Sentinel has been initialized.
+-- @treturn boolean True after successful initialization
+function M.is_initialized()
+    return state.initialized
+end
+
+--- Returns a copy of Sentinel's runtime state.
+-- @treturn table State snapshot
+function M.get_state()
+    local copy = {}
+    for key, value in pairs(state) do
+        copy[key] = value
+    end
+    return copy
+end
+
+--- Sets a Defold native crash user field.
+-- @tparam number|string index Crash user field index, or a configured name
+-- @tparam any value Value to store in the native crash user field
+-- @treturn boolean True when the field was written
+-- @treturn string|nil Error message on failure
+function M.set_crash_user_field(index, value)
+    local resolved_index = index
+    if type(index) ~= "number" then
+        if type(M.config) == "table" and type(M.config.crash_user_field_names) == "table" then
+            resolved_index = M.config.crash_user_field_names[index]
+        end
+    end
+
+    if type(resolved_index) ~= "number" then
+        return false, "crash user field index is invalid"
+    end
+
+    if type(crash) ~= "table" or type(crash.set_user_field) ~= "function" then
+        return false, "crash.set_user_field unavailable"
+    end
+
+    local text = trim_text(value, get_crash_user_field_size()) or ""
+    local _, err = safe_call(crash.set_user_field, resolved_index, text)
+    if err then
+        return false, tostring(err)
+    end
+
+    return true, nil
+end
+
+--- Writes a native crash dump through Defold's crash API.
+-- @treturn boolean True when the dump was written
+-- @treturn string|nil Error message on failure
+function M.write_crash_dump()
+    if type(crash) ~= "table" or type(crash.write_dump) ~= "function" then
+        set_status("Native crash dump failed: crash.write_dump unavailable", false)
+        return false, "crash.write_dump unavailable"
+    end
+
+    local _, err = safe_call(crash.write_dump)
+    if err then
+        local message = "Native crash dump failed: " .. tostring(err)
+        set_status(message, false)
+        return false, message
+    end
+
+    set_status("Native crash dump written", true)
+    return true, nil
+end
+
+--- Reports the previous native crash dump, if one exists.
+-- @tparam[opt] table event_overrides Message, tags, extra, and callback overrides
+-- @treturn boolean True when a previous crash report was submitted
+-- @treturn string|nil Error message on failure
+function M.report_previous_crash(event_overrides)
+    if type(M.config) ~= "table" then
+        set_status("Sentry is not initialized", false)
+        return false, "initialize first"
+    end
+
+    if state.previous_crash_checked then
+        set_status("Previous native crash already checked", true)
+        return false, "previous native crash already checked"
+    end
+
+    state.previous_crash_checked = true
+
+    if type(crash) ~= "table" or type(crash.load_previous) ~= "function" then
+        set_status("Previous native crash failed: crash.load_previous unavailable", false)
+        return false, "crash.load_previous unavailable"
+    end
+
+    local handle, load_err = safe_call(crash.load_previous)
+    if not handle then
+        if load_err then
+            local message = "Previous native crash load failed: " .. tostring(load_err)
+            set_status(message, false)
+            return false, message
+        end
+
+        set_status("No previous native crash dump", true)
+        return false, nil
+    end
+
+    state.previous_crash_found = true
+
+    local report = build_crash_report(handle)
+    safe_call(crash.release, handle)
+
+    local event = make_hard_crash_callback_error(report)
+    event.tags = {
+        kind = "defold_crash",
+        platform = tostring(SYS_INFO.system_name)
+    }
+    event.extra = make_crash_report_extra(report)
+
+    apply_event_overrides(event, M.config.previous_crash_event)
+    apply_event_overrides(event, event_overrides)
+
+    local ok, captured = pcall(M.capture_exception, event)
+    if not ok then
+        state.previous_crash_reported = false
+        local message = "Previous native crash capture failed: " .. tostring(captured)
+        set_status(message, false)
+        return false, message
+    end
+
+    state.previous_crash_reported = captured ~= false
+
+    if M.config.on_hard_crash then
+        local pstatus, perr = pcall(M.config.on_hard_crash, make_hard_crash_callback_error(report))
+        if not pstatus then
+            log_print("Hard crash callback error " .. tostring(perr))
+        end
+    end
+
+    if state.previous_crash_reported then
+        return true, nil
+    end
+
+    return false, state.last_error
+end
 
 --- Initialize Sentinel's Sentry Client.
 -- Configuration should happen as early as possible in your application's lifecycle.
@@ -314,10 +987,13 @@ end
 -- @tparam[opt] table config.tags Tags to send with every event
 -- @tparam[opt] function config.on_soft_crash Callback function for soft crashes
 -- @tparam[opt] function config.on_hard_crash Callback function for hard crashes
--- @tparam[opt] string config.release Project's Release ID
+-- @tparam[opt] string config.release Project's release ID. Defaults to project.title@project.version
 -- @tparam[opt] string config.dist The distribution. Used to disambiguate build or deployment variants
 -- @tparam[opt] string config.environment The environment. This string is freeform. E.g., 'staging' vs 'prod'
 -- @tparam[opt] table config.user User information to include with events
+-- @tparam[opt=8192] number config.crash_extra_text_limit Text limit for encoded native crash fields
+-- @tparam[opt] table config.crash_user_field_names Optional name-to-index mapping for crash user fields
+-- @tparam[opt] table config.previous_crash_event Optional event overrides for previous native crash reports
 function M.init(config)
     assert(type(config) == "table", "`config` should be a table.")
     M.config = config
@@ -336,6 +1012,12 @@ function M.init(config)
     end
     if type(M.config.compress_requests) ~= "boolean" then
         M.config.compress_requests = true
+    end
+    if type(M.config.crash_extra_text_limit) ~= "number" then
+        M.config.crash_extra_text_limit = DEFAULT_CRASH_EXTRA_TEXT_LIMIT
+    end
+    if type(M.config.release) ~= "string" or M.config.release == "" then
+        M.config.release = make_default_release()
     end
 
     --
@@ -356,35 +1038,14 @@ function M.init(config)
         log_print(USER_AGENT .. ", init OK")
     end
 
-    if not M.config.load_previous_crash then return end
+    state.initialized = true
+    set_status("Sentry initialized", true)
 
-    local handle = crash.load_previous()
-    if handle then
-        if M.config.debug then
-            log_print("Submitting previous crash dump")
-        end
-
-        local _, extra_data = pcall(crash.get_extra_data, handle)
-        local _, backtrace = pcall(crash.get_backtrace, handle)
-
-        local error = {
-            source = "crash",
-            message = json.encode(extra_data),
-            traceback = json.encode(backtrace),
-            fatal = true
-        }
-        local pstatus, perr = pcall(M.capture_exception, error)
-        if not pstatus then
-            log_print("Crash capture error " .. perr)
-        end
-
-        if M.config.on_hard_crash then
-            pstatus, perr = pcall(M.config.on_hard_crash, error)
-            log_print("Hard crash callback error " .. perr)
-        end
-
-        pcall(crash.release, handle)
+    if M.config.load_previous_crash then
+        M.report_previous_crash()
     end
+
+    return true
 end
 
 --- Manually adds a breadcrumb whenever something interesting happens.
@@ -398,7 +1059,7 @@ end
 -- @usage sentry.add_breadcrumb({ category = "log", message = "Test breadcrumb message" })
 function M.add_breadcrumb(breadcrumb)
     if type(M.config) ~= "table" then
-        return
+        return false
     end
 
     if M.breadcrumbs == nil then
@@ -414,6 +1075,8 @@ function M.add_breadcrumb(breadcrumb)
     if #M.breadcrumbs > 10 then
         table.remove(M.breadcrumbs, 1)
     end
+
+    return true
 end
 
 --- Set a globally defined tag.
@@ -424,10 +1087,11 @@ end
 -- @usage sentry.set_tag("user_id", 12345)
 function M.set_tag(key, value)
     if type(M.config) ~= "table" then
-        return
+        return false
     end
 
     M.config.tags[key] = value
+    return true
 end
 
 --- Sets globally defined extra data.
@@ -438,10 +1102,11 @@ end
 -- @usage sentry.set_extra("last_checkpoint", "boss_room")
 function M.set_extra(key, value)
     if type(M.config) ~= "table" then
-        return
+        return false
     end
 
     M.config.extra[key] = value
+    return true
 end
 
 --- Capture an error, i.e. send data to Sentry about the error.
@@ -474,24 +1139,32 @@ end
 function M.capture_exception(err)
     assert(type(M.config) == "table", "initialize first")
     assert(type(err) == "table", "`capture_exception` expects a table.")
+    err = clone_event(err)
+    local callback = wrap_capture_callback(err.callback)
 
     if not add_transaction(M.transactions) then
+        local message = "Too much messages per minute."
         if err.callback then
-            err.callback(nil, "Too much messages per minute.")
+            callback(nil, message)
         else
+            set_status("Sentry send failed: " .. message, false)
             log_print("Dropping the message, too much messages per minute.")
         end
-        return
+        return false, message
     end
 
-    if M.config.gameanalytics and gameanalytics then
+    local gameanalytics = rawget(_G, "gameanalytics")
+    if M.config.gameanalytics and type(gameanalytics) == "table" and type(gameanalytics.addErrorEvent) == "function" then
         gameanalytics.addErrorEvent({
             severity = err.fatal and "Critical" or "Error",
-            message = (err.message or "Error") .. "\n" .. err.traceback
+            message = (err.message or "Error") .. "\n" .. tostring(err.traceback or "")
         })
     end
 
     local event = new_event()
+    if type(err.event_platform) == "string" then
+        event.platform = err.event_platform
+    end
 
     if err.fatal then
         event.level = "fatal"
@@ -499,9 +1172,14 @@ function M.capture_exception(err)
         event.level = "error"
     end
 
-    event.exception = {}
-    event.exception["type"] = err.message or "error"
-    event.exception["value"] = err.traceback
+    local exception = make_exception_value(err)
+    event.message = err.message or "Error"
+    event.exception = {
+        values = {
+            exception
+        }
+    }
+    event.fingerprint = make_exception_fingerprint(err, exception)
 
     event.tags["source"] = err.source
 
@@ -528,10 +1206,9 @@ function M.capture_exception(err)
             log_print("Exception is recorded as " .. id)
         end
 
-        if err.callback then
-            err.callback(id, err_str)
-        end
+        callback(id, err_str)
     end)
+    return true, nil
 end
 
 --- Captures a bare message to be sent to Sentry.
@@ -552,14 +1229,18 @@ end
 function M.capture_message(msg)
     assert(type(M.config) == "table", "initialize first")
     assert(type(msg) == "table", "`capture_message` expects a table.")
+    msg = clone_event(msg)
+    local callback = wrap_capture_callback(msg.callback)
 
     if not add_transaction(M.transactions) then
+        local message = "Too much messages per minute."
         if msg.callback then
-            msg.callback(nil, "Too much messages per minute.")
+            callback(nil, message)
         else
+            set_status("Sentry send failed: " .. message, false)
             log_print("Dropping the message, too much messages per minute.")
         end
-        return
+        return false, message
     end
 
     local event = new_event()
@@ -590,10 +1271,9 @@ function M.capture_message(msg)
             log_print("Message is recorded as " .. id)
         end
 
-        if msg.callback then
-            msg.callback(id, err_str)
-        end
+        callback(id, err_str)
     end)
+    return true, nil
 end
 
 return M
