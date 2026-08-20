@@ -23,7 +23,6 @@
 #include <stdio.h>
 #include <sys/utsname.h>
 #include <unistd.h>
-#include <GL/gl.h>
 #elif defined(DM_PLATFORM_OSX)
 #include <mach/mach.h>
 #include <mach/mach_host.h>
@@ -35,9 +34,9 @@
 extern "C" bool SentinelPushMacOSMetalGpuInfo(lua_State* L, bool push_api_fields);
 #endif
 
-#if defined(DM_PLATFORM_WINDOWS) || defined(DM_PLATFORM_LINUX)
-// The system <GL/gl.h> on Windows and Linux only declares OpenGL 1.1, so this
-// GL 2.0 token (used by glGetString below) isn't defined without pulling in glext.h.
+#if defined(DM_PLATFORM_WINDOWS)
+// The system <GL/gl.h> on Windows only declares OpenGL 1.1, so this GL 2.0
+// token (used by glGetString below) isn't defined without pulling in glext.h.
 #ifndef GL_SHADING_LANGUAGE_VERSION
 #define GL_SHADING_LANGUAGE_VERSION 0x8B8C
 #endif
@@ -70,6 +69,7 @@ static void PushNumberField(lua_State* L, const char* key, double value)
     }
 }
 
+#if defined(DM_PLATFORM_WINDOWS)
 static void PushHexField(lua_State* L, const char* key, uint32_t value, uint32_t width)
 {
     if (value == 0)
@@ -81,6 +81,7 @@ static void PushHexField(lua_State* L, const char* key, uint32_t value, uint32_t
     snprintf(buffer, sizeof(buffer), "0x%0*x", width, value);
     PushStringField(L, key, buffer);
 }
+#endif
 
 static const char* AdapterFamilyToApiType(dmGraphics::AdapterFamily family)
 {
@@ -103,7 +104,7 @@ static const char* AdapterFamilyToApiType(dmGraphics::AdapterFamily family)
     }
 }
 
-#if defined(DM_PLATFORM_WINDOWS) || defined(DM_PLATFORM_LINUX) || defined(DM_PLATFORM_OSX)
+#if defined(DM_PLATFORM_WINDOWS) || defined(DM_PLATFORM_OSX)
 static bool CollectOpenGLGpuInfo(lua_State* L, dmGraphics::AdapterFamily family)
 {
     const char* api_type = AdapterFamilyToApiType(family);
@@ -626,7 +627,7 @@ static int GetGpuInfo(lua_State* L)
         has_values = true;
     }
 
-#if defined(DM_PLATFORM_WINDOWS) || defined(DM_PLATFORM_LINUX) || defined(DM_PLATFORM_OSX)
+#if defined(DM_PLATFORM_WINDOWS) || defined(DM_PLATFORM_OSX)
     if (family == dmGraphics::ADAPTER_FAMILY_OPENGL || family == dmGraphics::ADAPTER_FAMILY_OPENGLES)
     {
         has_backend_values = CollectOpenGLGpuInfo(L, family) || has_backend_values;

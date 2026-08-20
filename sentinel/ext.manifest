@@ -13,6 +13,3 @@ platforms:
     x86-win32:
         context:
             libs: ["advapi32", "dxgi", "opengl32"]
-    x86_64-linux:
-        context:
-            libs: ["GL"]
